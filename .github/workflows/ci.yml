@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Qualidade de codigo Python: lint (ruff) + testes (pytest)
+  # -------------------------------------------------------------------------
+  python-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff pytest
+          pip install -r generator/requirements.txt
+          pip install -r producer/requirements.txt
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Testes (pytest)
+        run: pytest
+
+  # -------------------------------------------------------------------------
+  # Validacao de configuracao (compose + DAG + presenca dos jobs SQL)
+  # -------------------------------------------------------------------------
+  config-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validar YAML do docker-compose
+        run: |
+          python -c "import yaml,sys; yaml.safe_load(open('docker-compose.yml')); print('docker-compose.yml OK')"
+
+      - name: Validar import da DAG do Airflow
+        run: |
+          python -c "import ast; ast.parse(open('airflow/dags/dbt_gold_analytics.py').read()); print('DAG OK')"
+
+      - name: Conferir jobs Flink SQL
+        run: |
+          for f in bronze silver gold; do
+            test -f "flink/sql/$f.sql" && echo "flink/sql/$f.sql OK" || (echo "FALTA flink/sql/$f.sql" && exit 1)
+          done
+
+  # -------------------------------------------------------------------------
+  # Build das imagens leves (gerador e producer)
+  # -------------------------------------------------------------------------
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: [python-quality]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build imagem do gerador CDC
+        run: docker build -t streamming/cdc-generator ./generator
+
+      - name: Build imagem do producer
+        run: docker build -t streamming/folder-producer ./producer

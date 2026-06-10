@@ -1,0 +1,25 @@
+version: 2
+
+models:
+  - name: mart_faturamento_por_cliente
+    description: "Faturamento consolidado por cliente"
+    columns:
+      - name: cliente_id
+        tests: [not_null]
+  - name: mart_faturamento_por_uf
+    description: "Faturamento por UF"
+    columns:
+      - name: uf_cliente
+        tests: [not_null]
+  - name: mart_vendas_diarias
+    description: "Vendas por dia"
+  - name: mart_ranking_produtos
+    description: "Ranking de produtos por valor vendido"
+    columns:
+      - name: produto_id
+        tests: [not_null]
+  - name: mart_resumo_impostos
+    description: "Resumo de impostos por tipo"
+    columns:
+      - name: tipo_imposto
+        tests: [not_null]

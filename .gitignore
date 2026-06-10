@@ -1,0 +1,36 @@
+# Dados gerados em runtime (CDC landing/processed/dlq)
+/data/landing/
+/data/processed/
+/data/dlq/
+data/landing/
+data/processed/
+data/dlq/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# dbt
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+dbt/.user.yml
+
+# Airflow
+airflow/logs/
+airflow/standalone_admin_password.txt
+*.generated
+
+# Flink / checkpoints locais
+flink-checkpoints/
+
+# Sistema
+.DS_Store
+Thumbs.db
+*.log
+
+.claude/

@@ -1,0 +1,13 @@
+streamming:
+  target: dev
+  outputs:
+    dev:
+      type: trino
+      method: none
+      host: trino
+      port: 8080
+      user: dbt
+      database: iceberg       # catalogo Trino (no dbt-trino, database == catalog)
+      schema: semantic        # schema de destino (camada Semantic do desenho)
+      threads: 1
+      http_scheme: http

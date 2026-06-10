@@ -1,0 +1,26 @@
+name: "streamming"
+version: "1.0.0"
+config-version: 2
+
+profile: "streamming"
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+macro-paths: ["macros"]
+seed-paths: ["seeds"]
+snapshot-paths: ["snapshots"]
+test-paths: ["tests"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Garante que o schema de destino exista no catalogo Iceberg
+on-run-start:
+  - "CREATE SCHEMA IF NOT EXISTS {{ target.database }}.{{ target.schema }}"
+
+models:
+  streamming:
+    marts:
+      +materialized: table

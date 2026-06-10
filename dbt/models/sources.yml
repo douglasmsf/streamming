@@ -1,0 +1,19 @@
+version: 2
+
+sources:
+  - name: gold
+    database: iceberg
+    schema: gold
+    description: "Camada gold (nota consolidada) gerada em tempo real pelo Flink"
+    tables:
+      - name: nota_fiscal
+
+  - name: silver
+    database: iceberg
+    schema: silver
+    description: "Camada silver (deduplicada/upsert) gerada pelo Flink"
+    tables:
+      - name: cabecalho
+      - name: itens
+      - name: impostos
+      - name: cliente

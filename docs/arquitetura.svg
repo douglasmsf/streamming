@@ -1,0 +1,191 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1660" height="900" viewBox="0 0 1660 900" font-family="Segoe UI, Roboto, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#5b8cff"/>
+    </marker>
+    <marker id="arrowP" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#a96fb0"/>
+    </marker>
+    <style>
+      .lane   { fill:#10162e; stroke:#26305a; stroke-width:1.5; rx:16; }
+      .lane-t { fill:#8a93b8; font-size:12px; font-weight:700; letter-spacing:1.5px; }
+      .box    { stroke-width:1.5; rx:10; }
+      .title  { fill:#e7ecff; font-size:13px; font-weight:700; }
+      .sub    { fill:#9aa3c7; font-size:10.5px; }
+      .flow   { stroke:#5b8cff; stroke-width:2; fill:none; marker-end:url(#arrow); }
+      .flowP  { stroke:#a96fb0; stroke-width:2; fill:none; marker-end:url(#arrowP); }
+      .lbl    { fill:#5b8cff; font-size:10px; font-weight:700; }
+      .lblP   { fill:#a96fb0; font-size:10px; font-weight:700; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1660" height="900" fill="#0b1020"/>
+  <text x="40" y="44" fill="#e7ecff" font-size="23" font-weight="800">Plataforma de Streaming CDC — Notas Fiscais (equivalente local da arquitetura AWS)</text>
+  <text x="40" y="68" fill="#8a93b8" font-size="12.5">DMS→Landing | MSK→Kafka | Flink Transformation+Persistence | S3→MinIO/Iceberg | Glue DQ→Great Expectations | dbt Semantic | REST API+oAuth</text>
+
+  <!-- ===================== LANES ===================== -->
+  <rect class="lane" x="40"   y="92" width="210" height="760"/>
+  <text class="lane-t" x="56" y="118">INGESTAO (DMS + DLQ)</text>
+
+  <rect class="lane" x="268"  y="92" width="200" height="760"/>
+  <text class="lane-t" x="284" y="118">KAFKA (MSK) — CAMADAS</text>
+
+  <rect class="lane" x="486"  y="92" width="250" height="370"/>
+  <text class="lane-t" x="502" y="118">FLINK · TRANSFORMATION</text>
+
+  <rect class="lane" x="486"  y="480" width="250" height="372"/>
+  <text class="lane-t" x="502" y="506">FLINK · PERSISTENCE</text>
+
+  <rect class="lane" x="754"  y="92" width="230" height="760"/>
+  <text class="lane-t" x="770" y="118">ICEBERG + MINIO (S3)</text>
+
+  <rect class="lane" x="1002" y="92" width="620" height="760"/>
+  <text class="lane-t" x="1018" y="118">CONSUMO / SERVING</text>
+
+  <!-- ===================== INGESTAO ===================== -->
+  <rect class="box" x="58" y="140" width="174" height="66" fill="#172554" stroke="#3b5bdb"/>
+  <text class="title" x="72" y="166">cdc-generator</text>
+  <text class="sub" x="72" y="184">simula DMS (fullload+CDC)</text>
+  <text class="sub" x="72" y="198">1–3 reg/s · inserts+updates</text>
+
+  <rect class="box" x="58" y="230" width="174" height="56" fill="#0e1430" stroke="#3a4569"/>
+  <text class="title" x="72" y="254">/data/landing</text>
+  <text class="sub" x="72" y="272">JSON por tabela</text>
+
+  <rect class="box" x="58" y="312" width="174" height="66" fill="#172554" stroke="#3b5bdb"/>
+  <text class="title" x="72" y="338">folder-producer</text>
+  <text class="sub" x="72" y="356">pub lz · chave=PK</text>
+  <text class="sub" x="72" y="370">retry/DLQ (Lambda+SQS)</text>
+
+  <rect class="box" x="58" y="402" width="174" height="50" fill="#3a1f1f" stroke="#c06060"/>
+  <text class="title" x="72" y="424">/data/dlq</text>
+  <text class="sub" x="72" y="440">reprocesso FIFO</text>
+
+  <!-- ===================== KAFKA TOPICS ===================== -->
+  <rect class="box" x="284" y="150" width="168" height="56" fill="#0e1430" stroke="#3a4569"/>
+  <text class="title" x="298" y="174">issuance_*_lz</text>
+  <text class="sub" x="298" y="192">landing zone (4 topicos)</text>
+
+  <rect class="box" x="284" y="320" width="168" height="56" fill="#3b2f12" stroke="#b08a2e"/>
+  <text class="title" x="298" y="344">issuance_*_bronze</text>
+  <text class="sub" x="298" y="362">padronizado (4)</text>
+
+  <rect class="box" x="284" y="500" width="168" height="56" fill="#3a2b3f" stroke="#a96fb0"/>
+  <text class="title" x="298" y="524">issuance_*_silver</text>
+  <text class="sub" x="298" y="542">upsert/dedup (4)</text>
+
+  <rect class="box" x="284" y="680" width="168" height="56" fill="#173a2e" stroke="#2f9e76"/>
+  <text class="title" x="298" y="704">issuance_nota_gold</text>
+  <text class="sub" x="298" y="722">consolidado (1)</text>
+
+  <!-- ===================== TRANSFORMATION ===================== -->
+  <rect class="box" x="504" y="150" width="214" height="56" fill="#1d2b50" stroke="#3b5bdb"/>
+  <text class="title" x="518" y="174">lz → bronze</text>
+  <text class="sub" x="518" y="192">padroniza (append, keyed)</text>
+
+  <rect class="box" x="504" y="270" width="214" height="56" fill="#1d2b50" stroke="#3b5bdb"/>
+  <text class="title" x="518" y="294">bronze → silver</text>
+  <text class="sub" x="518" y="312">dedup/upsert + renomeia</text>
+
+  <rect class="box" x="504" y="390" width="214" height="56" fill="#1d2b50" stroke="#3b5bdb"/>
+  <text class="title" x="518" y="414">silver → gold</text>
+  <text class="sub" x="518" y="432">join consolidado</text>
+
+  <!-- ===================== PERSISTENCE ===================== -->
+  <rect class="box" x="504" y="528" width="214" height="44" fill="#241a33" stroke="#a96fb0"/>
+  <text class="title" x="518" y="555">commit lz → iceberg.lz</text>
+  <rect class="box" x="504" y="584" width="214" height="44" fill="#241a33" stroke="#a96fb0"/>
+  <text class="title" x="518" y="611">commit bronze → iceberg.bronze</text>
+  <rect class="box" x="504" y="640" width="214" height="44" fill="#241a33" stroke="#a96fb0"/>
+  <text class="title" x="518" y="667">commit silver → iceberg.silver</text>
+  <rect class="box" x="504" y="696" width="214" height="44" fill="#241a33" stroke="#a96fb0"/>
+  <text class="title" x="518" y="723">commit gold → iceberg.gold</text>
+
+  <!-- ===================== ICEBERG / MINIO ===================== -->
+  <rect class="box" x="772" y="140" width="194" height="54" fill="#172554" stroke="#3b5bdb"/>
+  <text class="title" x="786" y="164">Iceberg REST</text>
+  <text class="sub" x="786" y="182">catalogo (Flink+Trino)</text>
+
+  <rect class="box" x="772" y="214" width="194" height="318" fill="#0e1430" stroke="#3a4569"/>
+  <text class="title" x="786" y="238">MinIO  s3://warehouse</text>
+  <rect x="786" y="252" width="166" height="40" rx="8" fill="#10162e" stroke="#3a4569"/><text class="sub" x="798" y="277" fill="#e7ecff">lz.*    (Parquet)</text>
+  <rect x="786" y="300" width="166" height="40" rx="8" fill="#3b2f12" stroke="#b08a2e"/><text class="sub" x="798" y="325" fill="#e7ecff">bronze.*  (Parquet)</text>
+  <rect x="786" y="348" width="166" height="40" rx="8" fill="#3a2b3f" stroke="#a96fb0"/><text class="sub" x="798" y="373" fill="#e7ecff">silver.*  (Parquet)</text>
+  <rect x="786" y="396" width="166" height="40" rx="8" fill="#173a2e" stroke="#2f9e76"/><text class="sub" x="798" y="421" fill="#e7ecff">gold.*  (Parquet)</text>
+  <rect x="786" y="444" width="166" height="40" rx="8" fill="#1d2b50" stroke="#5b8cff"/><text class="sub" x="798" y="469" fill="#e7ecff">semantic.*  (dbt)</text>
+
+  <!-- ===================== CONSUMO / SERVING ===================== -->
+  <rect class="box" x="1020" y="140" width="280" height="60" fill="#172554" stroke="#3b5bdb"/>
+  <text class="title" x="1034" y="164">Trino</text>
+  <text class="sub" x="1034" y="184">SQL ad-hoc (todas as camadas)</text>
+
+  <rect class="box" x="1020" y="222" width="280" height="86" fill="#172554" stroke="#3b5bdb"/>
+  <text class="title" x="1034" y="246">Airflow → dbt (Semantic)</text>
+  <text class="sub" x="1034" y="266">DAG agenda dbt run/test</text>
+  <text class="sub" x="1034" y="284">marts → iceberg.semantic</text>
+  <text class="sub" x="1034" y="300">(faturamento, UF, produtos, impostos)</text>
+
+  <rect class="box" x="1020" y="330" width="280" height="74" fill="#241a33" stroke="#a96fb0"/>
+  <text class="title" x="1034" y="354">Airflow → Great Expectations</text>
+  <text class="sub" x="1034" y="374">Data Quality (= Glue DQ)</text>
+  <text class="sub" x="1034" y="392">valida gold/silver via Trino</text>
+
+  <rect class="box" x="1330" y="222" width="272" height="120" fill="#172554" stroke="#3b5bdb"/>
+  <text class="title" x="1344" y="246">REST API + OAuth2 (IDP)</text>
+  <text class="sub" x="1344" y="266">client credentials → JWT</text>
+  <text class="sub" x="1344" y="284">GET /api/v1/... (Bearer)</text>
+  <text class="sub" x="1344" y="302">serve a camada semantic</text>
+  <text class="sub" x="1344" y="320">:8060</text>
+
+  <rect class="box" x="1330" y="362" width="272" height="120" fill="#173a2e" stroke="#2f9e76"/>
+  <text class="title" x="1344" y="386">Dashboard (tempo real)</text>
+  <text class="sub" x="1344" y="406">Flask + Trino, poll 3s</text>
+  <text class="sub" x="1344" y="424">KPIs, faturamento UF/segmento</text>
+  <text class="sub" x="1344" y="442">ultimas notas (upsert ao vivo)</text>
+  <text class="sub" x="1344" y="460">:8050</text>
+
+  <!-- ===================== FLOWS ===================== -->
+  <!-- ingestao interna -->
+  <path class="flow" d="M145,206 L145,230"/>
+  <path class="flow" d="M145,286 L145,312"/>
+  <path class="flowP" d="M120,378 L120,402"/>
+  <path class="flowP" d="M180,402 C200,395 200,360 188,350"/>
+  <!-- producer -> lz topic -->
+  <path class="flow" d="M232,340 C258,330 262,200 284,186"/>
+  <text class="lbl" x="240" y="250">pub lz</text>
+
+  <!-- transformation: kafka topics <-> transform steps -->
+  <path class="flow" d="M452,178 L504,178"/><text class="lbl" x="462" y="168">sub</text>
+  <path class="flow" d="M718,196 C740,230 300,300 452,332" opacity="0"/>
+  <path class="flow" d="M504,196 C470,230 458,300 452,322"/><text class="lbl" x="462" y="250">pub bronze</text>
+  <path class="flow" d="M452,348 L504,300"/><text class="lbl" x="462" y="300">sub</text>
+  <path class="flow" d="M504,318 C470,400 458,470 452,512"/><text class="lbl" x="462" y="430">pub silver</text>
+  <path class="flow" d="M452,528 L504,420"/><text class="lbl" x="462" y="480">sub</text>
+  <path class="flow" d="M504,432 C470,560 458,650 452,706"/><text class="lbl" x="460" y="610">pub gold</text>
+
+  <!-- persistence: topics -> committers -->
+  <path class="flowP" d="M452,196 C475,300 480,470 504,548"/>
+  <path class="flowP" d="M452,360 C480,430 485,560 504,602"/>
+  <path class="flowP" d="M452,540 C485,580 490,640 504,660"/>
+  <path class="flowP" d="M452,712 L504,718"/>
+  <text class="lblP" x="460" y="520">sub</text>
+
+  <!-- committers -> iceberg -->
+  <path class="flowP" d="M718,550 C745,400 750,300 772,272"/>
+  <path class="flowP" d="M718,606 C745,460 752,360 772,320"/>
+  <path class="flowP" d="M718,662 C748,520 754,420 772,368"/>
+  <path class="flowP" d="M718,718 C750,560 756,470 772,416"/>
+
+  <!-- iceberg -> trino -->
+  <path class="flow" d="M966,180 C990,180 996,170 1020,170"/>
+  <!-- trino -> dbt / dq -->
+  <path class="flow" d="M1160,200 L1160,222"/>
+  <path class="flow" d="M1100,200 C1090,300 1095,320 1100,330"/>
+  <!-- dbt writes semantic back to iceberg -->
+  <path class="flowP" d="M1020,265 C980,265 968,455 956,464"/>
+  <!-- trino -> rest api / dashboard -->
+  <path class="flow" d="M1300,180 C1320,200 1330,250 1346,222"/>
+  <path class="flow" d="M1300,185 C1330,300 1336,360 1340,362"/>
+
+  <text x="40" y="876" fill="#5b667f" font-size="11.5">Tudo em Docker Compose local • Iceberg/Parquet sobre MinIO • CI/CD via GitHub Actions (executável com act) • azul = transformation, roxo = persistence</text>
+</svg>

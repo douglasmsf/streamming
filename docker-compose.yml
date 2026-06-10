@@ -1,0 +1,346 @@
+﻿# ===========================================================================
+# Plataforma de streaming CDC -> Kafka -> Flink (Iceberg medallion) -> Trino
+#                                              -> Airflow + dbt (analytics)
+# ---------------------------------------------------------------------------
+# Suba a infraestrutura:   docker compose up -d
+# Submeta os jobs Flink:   docker compose run --rm flink-sql-submit
+# ===========================================================================
+
+name: streamming
+
+services:
+
+  # -------------------------------------------------------------------------
+  # Kafka (KRaft, sem Zookeeper)
+  # -------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:3.8.0
+    hostname: kafka
+    ports:
+      - "29092:29092"   # acesso a partir do host (localhost:29092)
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 1
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+    networks: [plataforma]
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    ports:
+      - "8088:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: "true"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks: [plataforma]
+
+  # -------------------------------------------------------------------------
+  # MinIO (armazenamento S3 para o Iceberg)
+  # -------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"   # API S3
+      - "9001:9001"   # Console web
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_DOMAIN: minio
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+    volumes:
+      - minio-data:/data
+    networks: [plataforma]
+
+  # Cria o bucket "warehouse" assim que o MinIO sobe
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &&
+      mc mb --ignore-existing local/${WAREHOUSE_BUCKET} &&
+      mc anonymous set public local/${WAREHOUSE_BUCKET} &&
+      echo 'Bucket ${WAREHOUSE_BUCKET} pronto.';
+      "
+    networks: [plataforma]
+
+  # -------------------------------------------------------------------------
+  # Postgres de metadados do catalogo Iceberg (suporta commits concorrentes;
+  # substitui o SQLite default, que trava com SQLITE_BUSY sob varios writers)
+  # -------------------------------------------------------------------------
+  iceberg-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: iceberg
+      POSTGRES_PASSWORD: iceberg
+      POSTGRES_DB: iceberg
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "iceberg"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - iceberg-db-data:/var/lib/postgresql/data
+    networks: [plataforma]
+
+  # -------------------------------------------------------------------------
+  # Iceberg REST Catalog (backend Postgres)
+  # -------------------------------------------------------------------------
+  iceberg-rest:
+    image: tabulario/iceberg-rest:1.6.0
+    ports:
+      - "8181:8181"
+    environment:
+      CATALOG_WAREHOUSE: s3://${WAREHOUSE_BUCKET}/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_URI: jdbc:postgresql://iceberg-db:5432/iceberg
+      CATALOG_JDBC_USER: iceberg
+      CATALOG_JDBC_PASSWORD: iceberg
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: ${AWS_REGION}
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      iceberg-db:
+        condition: service_healthy
+    networks: [plataforma]
+
+  # -------------------------------------------------------------------------
+  # Flink (JobManager + TaskManager) com jars de Iceberg/Kafka/S3
+  # -------------------------------------------------------------------------
+  flink-jobmanager:
+    build: ./flink
+    image: streamming/flink:1.18.1
+    command: jobmanager
+    ports:
+      - "8081:8081"   # Flink Web UI
+    environment:
+      AWS_REGION: ${AWS_REGION}
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        rest.address: flink-jobmanager
+        rest.bind-address: 0.0.0.0
+        parallelism.default: 1
+        execution.checkpointing.interval: 60s
+        execution.checkpointing.min-pause: 20s
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+        state.backend.type: hashmap
+        restart-strategy: fixed-delay
+        restart-strategy.fixed-delay.attempts: 2147483647
+        restart-strategy.fixed-delay.delay: 10 s
+        taskmanager.numberOfTaskSlots: 40
+    depends_on:
+      iceberg-rest:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+    networks: [plataforma]
+
+  flink-taskmanager:
+    build: ./flink
+    image: streamming/flink:1.18.1
+    command: taskmanager
+    environment:
+      AWS_REGION: ${AWS_REGION}
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 40
+        taskmanager.memory.process.size: 2560m
+        parallelism.default: 1
+        execution.checkpointing.interval: 60s
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+    depends_on:
+      flink-jobmanager:
+        condition: service_started
+    mem_limit: 3g
+    networks: [plataforma]
+
+  # Job one-shot: submete bronze.sql, silver.sql e gold.sql ao cluster Flink
+  flink-sql-submit:
+    build: ./flink
+    image: streamming/flink:1.18.1
+    profiles: ["submit"]
+    entrypoint: ["/opt/sql/submit_jobs.sh"]
+    environment:
+      FLINK_PROPERTIES: |
+        execution.target: remote
+        jobmanager.rpc.address: flink-jobmanager
+        rest.address: flink-jobmanager
+        rest.port: 8081
+    volumes:
+      - ./flink/sql:/opt/sql
+    depends_on:
+      flink-jobmanager:
+        condition: service_started
+    networks: [plataforma]
+
+  # -------------------------------------------------------------------------
+  # Trino (consulta sobre o Iceberg)
+  # -------------------------------------------------------------------------
+  trino:
+    image: trinodb/trino:447
+    ports:
+      - "8080:8080"
+    mem_limit: 3g
+    volumes:
+      - ./trino/etc:/etc/trino:ro
+    depends_on:
+      iceberg-rest:
+        condition: service_started
+    networks: [plataforma]
+
+  # -------------------------------------------------------------------------
+  # Gerador CDC -> escreve arquivos JSON na pasta ./data/landing
+  # -------------------------------------------------------------------------
+  cdc-generator:
+    build: ./generator
+    image: streamming/cdc-generator:latest
+    environment:
+      LANDING_DIR: /data/landing
+      CDC_MIN_RPS: ${CDC_MIN_RPS}
+      CDC_MAX_RPS: ${CDC_MAX_RPS}
+      CDC_UPDATE_RATIO: ${CDC_UPDATE_RATIO}
+    volumes:
+      - ./data:/data
+    networks: [plataforma]
+
+  # -------------------------------------------------------------------------
+  # Producer -> le os arquivos da pasta e publica nos topicos de landing zone
+  # (issuance_*_lz). Com DLQ/retry (simula Lambda + SQS FIFO).
+  # -------------------------------------------------------------------------
+  folder-producer:
+    build: ./producer
+    image: streamming/folder-producer:latest
+    environment:
+      LANDING_DIR: /data/landing
+      PROCESSED_DIR: /data/processed
+      DLQ_DIR: /data/dlq
+      KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP_INTERNAL}
+      TOPIC_PREFIX: issuance
+    volumes:
+      - ./data:/data
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks: [plataforma]
+
+  # -------------------------------------------------------------------------
+  # Serving: REST API (Flask) + OAuth2 simulado, servindo a camada semantic
+  # -------------------------------------------------------------------------
+  serving:
+    build: ./serving
+    image: streamming/serving:latest
+    ports:
+      - "8060:8060"
+    environment:
+      TRINO_HOST: trino
+      TRINO_PORT: 8080
+      OAUTH_CLIENT_ID: potencial
+      OAUTH_CLIENT_SECRET: secret
+      JWT_SECRET: troque-este-segredo
+    depends_on:
+      trino:
+        condition: service_started
+    networks: [plataforma]
+
+  # -------------------------------------------------------------------------
+  # Dashboard em tempo real (Flask consultando o Trino)
+  # -------------------------------------------------------------------------
+  dashboard:
+    build: ./dashboard
+    image: streamming/dashboard:latest
+    ports:
+      - "8050:8050"
+    environment:
+      TRINO_HOST: trino
+      TRINO_PORT: 8080
+    volumes:
+      - ./docs:/app/docs:ro
+    depends_on:
+      trino:
+        condition: service_started
+    networks: [plataforma]
+
+  # -------------------------------------------------------------------------
+  # Airflow (orquestra o dbt) + Postgres de metadados
+  # -------------------------------------------------------------------------
+  airflow-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - airflow-db-data:/var/lib/postgresql/data
+    networks: [plataforma]
+
+  airflow:
+    build: ./airflow
+    image: streamming/airflow:latest
+    ports:
+      - "8082:8080"   # Airflow Web UI
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+      _AIRFLOW_ADMIN_USER: ${AIRFLOW_ADMIN_USER}
+      _AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
+      DBT_PROFILES_DIR: /opt/airflow/dbt
+      DBT_PROJECT_DIR: /opt/airflow/dbt
+    command: ["bash", "/opt/airflow/entrypoint.sh"]
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/entrypoint.sh:/opt/airflow/entrypoint.sh:ro
+      - ./dbt:/opt/airflow/dbt
+      - ./dq:/opt/airflow/dq
+      - airflow-logs:/opt/airflow/logs
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+    networks: [plataforma]
+
+networks:
+  plataforma:
+    name: plataforma
+    driver: bridge
+
+volumes:
+  minio-data:
+  airflow-db-data:
+  airflow-logs:
+  iceberg-db-data:

@@ -1,0 +1,2 @@
+# As subpastas landing/ e processed/ sao criadas em runtime pelo gerador e
+# pelo producer. Os dados em si nao sao versionados (ver .gitignore).
