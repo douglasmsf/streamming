@@ -91,6 +91,9 @@ Depois abra o **Console em tempo real** 👉 **http://localhost:8050**
 | Kafka UI | http://localhost:8088 | — |
 | MinIO | http://localhost:9001 | admin / password |
 
+> 📋 Guia completo de acessos (URLs, endpoints, credenciais e exemplos) em
+> [`docs/acessos.md`](docs/acessos.md).
+
 ## 💡 O que este projeto demonstra
 
 - **Engenharia de dados em streaming**: CDC, mensageria, *stream processing* declarativo (Flink SQL).
@@ -127,6 +130,7 @@ Depois abra o **Console em tempo real** 👉 **http://localhost:8050**
 - [🧬 Modelo de dados](docs/modelo-dados.md)
 - [🔄 CDC, updates e upsert](docs/cdc-e-upsert.md)
 - [⚙️ Runbook (operação e troubleshooting)](docs/runbook.md)
+- [🔑 Guia de acessos (URLs, credenciais e exemplos)](docs/acessos.md)
 
 ## 🧪 Desenvolvimento
 
