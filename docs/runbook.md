@@ -62,12 +62,24 @@ A DAG `dbt_gold_analytics` roda a cada 10 min. Para disparar na hora:
 ```
 Ou pela UI do Airflow (http://localhost:8082). Depois consulte:
 ```sql
-SELECT * FROM iceberg.analytics.mart_faturamento_por_uf ORDER BY faturamento DESC;
+SELECT * FROM iceberg.semantic.mart_faturamento_por_uf ORDER BY faturamento DESC;
 ```
 
-## 5. Inspecionar o "CDC bruto"
+DAGs disponíveis no Airflow:
+- `dbt_semantic` — constrói a camada `semantic` (a cada 10 min)
+- `dq_great_expectations` — Data Quality (a cada 15 min)
+- `iceberg_maintenance` — `OPTIMIZE` + `expire_snapshots` para manter as
+  tabelas compactas e o Trino rápido (a cada 5 min)
+
+## 5. Dashboard em tempo real
+O console em http://localhost:8050 **consome o Kafka diretamente** (não usa o
+Trino), então mostra os dados atualizando ao vivo a cada mensagem: KPIs,
+faturamento por UF/segmento e as últimas notas (upsert).
+
+## 6. Inspecionar o "CDC bruto"
 Os arquivos JSON gerados ficam em `./data/landing/<tabela>/` (antes de irem
-para o Kafka) e em `./data/processed/<tabela>/` (depois de publicados).
+para o Kafka), `./data/processed/<tabela>/` (publicados) e `./data/dlq/`
+(falhas reprocessadas).
 
 ## Operações úteis
 
@@ -85,6 +97,8 @@ para o Kafka) e em `./data/processed/<tabela>/` (depois de publicados).
 | Jobs Flink falham com `ClassNotFound hadoop` | A imagem do Flink precisa ter buildado os jars. Rode `docker compose build flink-jobmanager`. |
 | Trino não enxerga as tabelas | Os jobs Flink ainda não fizeram o 1º checkpoint (~60s) ou não foram submetidos. |
 | Persistência Flink em `RESTARTING` com `SQLITE_BUSY` | Já resolvido: o catálogo usa Postgres (`iceberg-db`), não SQLite. Confirme que `iceberg-db` está `healthy`. |
+| Dashboard (8050) sem dados | Ele lê do Kafka; confirme que os tópicos `issuance_*` existem e que o `folder-producer` está publicando. Reinicie: `docker compose restart dashboard`. |
+| Trino lento/instável após horas | Rode a DAG `iceberg_maintenance` (ou `ALTER TABLE ... EXECUTE optimize`). O dashboard não é afetado (lê do Kafka). |
 | Jobs não aparecem no cluster (submit) | O `submit_jobs.sh` escreve `execution.target: remote` no `flink-conf.yaml`; confira que o JobManager subiu com `rest.bind-address: 0.0.0.0`. |
 | Persistência falha com `Unable to load region` | Os serviços Flink precisam de `AWS_REGION` (já no compose). |
 | Trino reiniciando / OOM | Aumente a memória do VM do Docker (ver pré-requisitos). Trino está capado em 3 GB (`mem_limit`). |

@@ -1,36 +1,55 @@
 """
-Console unico da plataforma (pagina web "tudo num lugar").
+Console da plataforma — DADOS EM TEMPO REAL direto do Kafka.
 
-Mostra, numa unica pagina que se atualiza sozinha:
-  - status (up/down) de cada servico (Kafka, Flink, Trino, Airflow, MinIO,
-    Iceberg REST, REST API de serving);
-  - contagem de registros por CAMADA (lz -> bronze -> silver -> gold -> semantic);
-  - os JOBS Flink rodando (Transformation + Persistence);
-  - KPIs e dados de venda em TEMPO REAL (faturamento, UF, segmento, ultimas notas);
-  - o diagrama da arquitetura;
-  - links para abrir cada UI.
+Em vez de consultar o Trino (lento sob streaming pesado), o dashboard consome
+diretamente os topicos Kafka e mantem o estado em memoria, atualizando a cada
+mensagem que chega. Resultado: streaming de verdade, atualizando ao vivo.
+
+  - issuance_nota_gold  -> estado das notas (KPIs, UF, segmento, ultimas notas)
+  - issuance_*_lz/bronze -> contadores de eventos por camada (append)
+  - issuance_*_silver    -> chaves distintas por camada (upsert)
+  - semantic (dbt)       -> contagem ocasional via Trino (camada batch)
 
 Endpoints:
   GET /                 -> console HTML
-  GET /api/console      -> JSON com tudo
+  GET /api/console      -> JSON com tudo (calculado do estado em memoria)
   GET /architecture.svg -> diagrama
 """
 
 from __future__ import annotations
 
+import json
 import os
 import socket
+import threading
+import time
+import uuid
 
 import requests
+from confluent_kafka import Consumer
 from flask import Flask, jsonify, send_file
-from trino.dbapi import connect
 
 app = Flask(__name__)
 
+
+@app.after_request
+def sem_cache(resp):
+    resp.headers["Cache-Control"] = "no-store, no-cache, max-age=0, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+KAFKA = os.getenv("KAFKA_BOOTSTRAP", "kafka:9092")
 TRINO_HOST = os.getenv("TRINO_HOST", "trino")
 TRINO_PORT = int(os.getenv("TRINO_PORT", "8080"))
 
-# servico -> (host interno, porta, url externa p/ abrir no navegador)
+ENTIDADES = ["cabecalho", "itens", "impostos", "cliente"]
+LZ_TOPICS = [f"issuance_{e}_lz" for e in ENTIDADES]
+BRONZE_TOPICS = [f"issuance_{e}_bronze" for e in ENTIDADES]
+SILVER_TOPICS = [f"issuance_{e}_silver" for e in ENTIDADES]
+GOLD_TOPIC = "issuance_nota_gold"
+ALL_TOPICS = LZ_TOPICS + BRONZE_TOPICS + SILVER_TOPICS + [GOLD_TOPIC]
+
 SERVICOS = [
     ("Kafka", "kafka", 9092, "http://localhost:8088"),
     ("Kafka UI", "kafka-ui", 8080, "http://localhost:8088"),
@@ -42,46 +61,23 @@ SERVICOS = [
     ("REST API", "serving", 8060, "http://localhost:8060/health"),
 ]
 
-# camada -> tabela representativa para contar registros
-CAMADAS = [
-    ("lz", "iceberg.lz.cabecalho"),
-    ("bronze", "iceberg.bronze.cabecalho"),
-    ("silver", "iceberg.silver.cabecalho"),
-    ("gold", "iceberg.gold.nota_fiscal"),
-    ("semantic", "iceberg.semantic.mart_faturamento_por_uf"),
-]
+# ---- estado em memoria (atualizado pela thread consumidora do Kafka) ----
+LOCK = threading.Lock()
+STATE = {"lz": 0, "bronze": 0, "seq": 0, "semantic": None}
+SILVER_KEYS: set = set()
+NOTAS: dict = {}
+
+# status de servicos/flink: atualizado por thread de fundo (fora do request)
+SERVICOS_STATUS: list = [{"nome": n, "up": False, "url": u} for (n, _h, _p, u) in SERVICOS]
+FLINK_STATUS: list = []
 
 
-def porta_aberta(host: str, port: int, timeout: float = 1.0) -> bool:
+def porta_aberta(host: str, port: int, timeout: float = 0.5) -> bool:
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True
     except OSError:
         return False
-
-
-def run_query(sql: str):
-    try:
-        conn = connect(host=TRINO_HOST, port=TRINO_PORT, user="console", catalog="iceberg")
-        cur = conn.cursor()
-        cur.execute(sql)
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-        return rows
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def scalar(sql: str):
-    rows = run_query(sql)
-    if rows is None:
-        return None
-    return rows[0][0] if rows else 0
-
-
-def f(v) -> float:
-    return float(v) if v is not None else 0.0
 
 
 def flink_jobs():
@@ -93,52 +89,135 @@ def flink_jobs():
         return []
 
 
+def num(v) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Consumidor Kafka: mantem o estado em tempo real
+# ---------------------------------------------------------------------------
+def consumir() -> None:
+    while True:
+        try:
+            c = Consumer(
+                {
+                    "bootstrap.servers": KAFKA,
+                    "group.id": f"dashboard-{uuid.uuid4()}",
+                    "auto.offset.reset": "earliest",
+                    "enable.auto.commit": False,
+                }
+            )
+            c.subscribe(ALL_TOPICS)
+            while True:
+                msg = c.poll(1.0)
+                if msg is None or msg.error():
+                    continue
+                topic = msg.topic()
+                key = msg.key().decode("utf-8") if msg.key() else None
+                raw = msg.value()
+                with LOCK:
+                    if topic.endswith("_lz"):
+                        STATE["lz"] += 1
+                    elif topic.endswith("_bronze"):
+                        STATE["bronze"] += 1
+                    elif topic.endswith("_silver"):
+                        if key is not None:
+                            if raw is None:
+                                SILVER_KEYS.discard((topic, key))
+                            else:
+                                SILVER_KEYS.add((topic, key))
+                    elif topic == GOLD_TOPIC and key is not None:
+                        if raw is None:
+                            NOTAS.pop(key, None)
+                        else:
+                            try:
+                                rec = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
+                            STATE["seq"] += 1
+                            rec["_seq"] = STATE["seq"]
+                            NOTAS[key] = rec
+        except Exception as exc:  # noqa: BLE001
+            app.logger.warning("consumidor reiniciando: %s", exc)
+            time.sleep(3)
+
+
+def contar_semantic() -> None:
+    """Conta a camada semantic (dbt) via Trino, ocasionalmente (batch)."""
+    from trino.dbapi import connect
+    while True:
+        try:
+            conn = connect(
+                host=TRINO_HOST, port=TRINO_PORT, user="console", catalog="iceberg",
+                session_properties={"query_max_execution_time": "10s"},
+            )
+            cur = conn.cursor()
+            cur.execute("SELECT count(*) FROM iceberg.semantic.mart_faturamento_por_uf")
+            STATE["semantic"] = int(cur.fetchall()[0][0])
+            cur.close()
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(20)
+
+
+def monitorar() -> None:
+    """Atualiza status de servicos e jobs Flink fora do caminho do request."""
+    global SERVICOS_STATUS, FLINK_STATUS
+    while True:
+        SERVICOS_STATUS = [
+            {"nome": n, "up": porta_aberta(h, p), "url": u} for (n, h, p, u) in SERVICOS
+        ]
+        FLINK_STATUS = flink_jobs()
+        time.sleep(3)
+
+
+threading.Thread(target=consumir, daemon=True).start()
+threading.Thread(target=contar_semantic, daemon=True).start()
+threading.Thread(target=monitorar, daemon=True).start()
+
+
 @app.route("/api/console")
 def console_data():
-    GOLD = "iceberg.gold.nota_fiscal"
-
-    servicos = [
-        {"nome": n, "up": porta_aberta(h, p), "url": u} for (n, h, p, u) in SERVICOS
-    ]
-
-    camadas = []
-    for nome, tabela in CAMADAS:
-        c = scalar(f"SELECT count(*) FROM {tabela}")
-        camadas.append({"camada": nome, "registros": int(c) if c is not None else None})
-
-    kpi = run_query(
-        f"""SELECT count(*), coalesce(sum(valor_produtos),0), coalesce(sum(valor_impostos),0),
-                   coalesce(sum(valor_total),0), coalesce(sum(qtd_itens),0)
-            FROM {GOLD} WHERE status_nota <> 'CANCELADA'"""
-    )
-    k = kpi[0] if kpi else (0, 0, 0, 0, 0)
-
-    por_uf = run_query(
-        f"""SELECT coalesce(uf_cliente,'N/D'), sum(valor_total) FROM {GOLD}
-            WHERE status_nota <> 'CANCELADA' GROUP BY 1 ORDER BY 2 DESC LIMIT 10"""
-    ) or []
-    por_seg = run_query(
-        f"""SELECT coalesce(segmento_cliente,'N/D'), sum(valor_total) FROM {GOLD}
-            WHERE status_nota <> 'CANCELADA' GROUP BY 1 ORDER BY 2 DESC LIMIT 8"""
-    ) or []
-    recentes = run_query(
-        f"""SELECT nota_id, coalesce(nome_cliente,'?'), coalesce(uf_cliente,'--'),
-                   status_nota, coalesce(valor_total,0), atualizado_em
-            FROM {GOLD} ORDER BY atualizado_em DESC LIMIT 12"""
-    ) or []
+    with LOCK:
+        registros = {
+            "lz": STATE["lz"], "bronze": STATE["bronze"],
+            "silver": len(SILVER_KEYS), "gold": len(NOTAS), "semantic": STATE["semantic"],
+        }
+        vivas = [r for r in NOTAS.values() if r.get("status_nota") != "CANCELADA"]
+        uf: dict = {}
+        seg: dict = {}
+        for r in vivas:
+            u = r.get("uf_cliente") or "N/D"
+            uf[u] = uf.get(u, 0.0) + num(r.get("valor_total"))
+            s = r.get("segmento_cliente") or "N/D"
+            seg[s] = seg.get(s, 0.0) + num(r.get("valor_total"))
+        recent = sorted(NOTAS.values(), key=lambda r: r.get("_seq", 0), reverse=True)[:12]
+        kpi = {
+            "qtd_notas": len(vivas),
+            "produtos": sum(num(r.get("valor_produtos")) for r in vivas),
+            "impostos": sum(num(r.get("valor_impostos")) for r in vivas),
+            "faturamento": sum(num(r.get("valor_total")) for r in vivas),
+            "itens": sum(num(r.get("qtd_itens")) for r in vivas),
+        }
+        recentes = [
+            [r.get("nota_id"), r.get("nome_cliente") or "?", r.get("uf_cliente") or "--",
+             r.get("status_nota") or "?", num(r.get("valor_total")), str(r.get("atualizado_em") or "")]
+            for r in recent
+        ]
 
     return jsonify(
         {
-            "servicos": servicos,
-            "camadas": camadas,
-            "flink": flink_jobs(),
-            "kpi": {
-                "qtd_notas": int(k[0]), "produtos": f(k[1]), "impostos": f(k[2]),
-                "faturamento": f(k[3]), "itens": f(k[4]),
-            },
-            "por_uf": [[r[0], f(r[1])] for r in por_uf],
-            "por_segmento": [[r[0], f(r[1])] for r in por_seg],
-            "recentes": [[r[0], r[1], r[2], r[3], f(r[4]), str(r[5])] for r in recentes],
+            "servicos": SERVICOS_STATUS,
+            "camadas": [{"camada": c, "registros": registros[c]} for c in ["lz", "bronze", "silver", "gold", "semantic"]],
+            "flink": FLINK_STATUS,
+            "kpi": kpi,
+            "por_uf": sorted(uf.items(), key=lambda x: -x[1])[:10],
+            "por_segmento": sorted(seg.items(), key=lambda x: -x[1])[:8],
+            "recentes": recentes,
         }
     )
 
@@ -154,6 +233,7 @@ def arquitetura():
 PAGINA = """
 <!doctype html><html lang="pt-br"><head><meta charset="utf-8">
 <title>Plataforma de Streaming — Console</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <style>
   :root{--bg:#0b1020;--card:#151b33;--ink:#e7ecff;--mut:#8a93b8;--ac:#5b8cff;
         --gr:#36d399;--am:#fbbd23;--rd:#f87272;--pp:#a96fb0;}
@@ -181,9 +261,6 @@ PAGINA = """
   .kpi .l{color:var(--mut);font-size:11px;text-transform:uppercase}
   .kpi .v{font-size:23px;font-weight:800;margin-top:4px}
   .cols{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
-  .bar{display:flex;align-items:center;gap:8px;margin:6px 0;font-size:12px}
-  .bar .name{width:90px}.bar .track{flex:1;background:#0e1430;border-radius:6px;height:16px;overflow:hidden}
-  .bar .fill{height:100%;background:linear-gradient(90deg,var(--ac),#9b6bff)}.bar .val{width:96px;text-align:right;color:var(--mut)}
   table{width:100%;border-collapse:collapse;font-size:12px}
   th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #232a47}
   th{color:var(--mut);font-size:10.5px;text-transform:uppercase}
@@ -196,7 +273,7 @@ PAGINA = """
 </style></head><body>
 <header>
   <h1>🛰️ PLATAFORMA DE STREAMING CDC — CONSOLE</h1>
-  <div class="live"><span class="dot"></span> ao vivo · <span id="ts">--</span></div>
+  <div class="live"><span class="dot"></span> streaming ao vivo (Kafka) · <span id="ts">--</span></div>
 </header>
 <div class="wrap">
   <div class="card"><h3>Serviços</h3><div class="svc" id="svc"></div></div>
@@ -207,7 +284,7 @@ PAGINA = """
   <div class="card"><h3>Jobs Flink (Transformation + Persistence)</h3>
     <div id="flink"></div></div>
 
-  <div class="card"><h3>Vendas — KPIs (gold)</h3>
+  <div class="card"><h3>Vendas — KPIs (gold, ao vivo)</h3>
     <div class="kpis">
       <div><div class="l">Notas</div><div class="v" id="k_notas">0</div></div>
       <div><div class="l">Faturamento</div><div class="v" id="k_fat">R$ 0</div></div>
@@ -217,8 +294,10 @@ PAGINA = """
     </div></div>
 
   <div class="cols">
-    <div class="card"><h3>Faturamento por UF</h3><div id="uf"></div></div>
-    <div class="card"><h3>Faturamento por Segmento</h3><div id="seg"></div></div>
+    <div class="card"><h3>Faturamento por UF</h3>
+      <div style="height:260px"><canvas id="ufChart"></canvas></div></div>
+    <div class="card"><h3>Faturamento por Segmento</h3>
+      <div style="height:260px"><canvas id="segChart"></canvas></div></div>
     <div class="card"><h3>Últimas notas (upsert ao vivo)</h3><div id="tab"></div></div>
   </div>
 
@@ -226,9 +305,15 @@ PAGINA = """
 </div>
 <script>
 const brl=v=>v.toLocaleString('pt-BR',{style:'currency',currency:'BRL',maximumFractionDigits:0});
-function bars(rows){if(!rows||!rows.length)return '<div class="empty">aguardando dados…</div>';
-  const mx=Math.max(...rows.map(r=>r[1]),1);
-  return rows.map(r=>`<div class="bar"><span class="name">${r[0]}</span><span class="track"><span class="fill" style="width:${(r[1]/mx*100).toFixed(1)}%"></span></span><span class="val">${brl(r[1])}</span></div>`).join('');}
+let ufC,segC;
+function mkChart(id,color){ if(typeof Chart==='undefined') return null;
+  return new Chart(document.getElementById(id),{type:'bar',
+    data:{labels:[],datasets:[{data:[],backgroundColor:color,borderRadius:4}]},
+    options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,animation:false,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>brl(c.parsed.x)}}},
+      scales:{x:{ticks:{color:'#8a93b8',callback:v=>'R$'+Math.round(v/1000)+'k'},grid:{color:'#232a47'}},
+              y:{ticks:{color:'#e7ecff'},grid:{display:false}}}}});}
+function updChart(c,rows){ if(!c||!rows) return; c.data.labels=rows.map(r=>r[0]); c.data.datasets[0].data=rows.map(r=>r[1]); c.update('none'); }
 function svc(rows){return rows.map(s=>`<a href="${s.url}" target="_blank"><div class="n">${s.nome}</div>
   <div class="s"><span class="sd" style="background:${s.up?'var(--gr)':'var(--rd)'}"></span>${s.up?'no ar':'offline'}</div></a>`).join('');}
 function flow(rows){const ic={lz:'#8a93b8',bronze:'#b08a2e',silver:'#a96fb0',gold:'#2f9e76',semantic:'#5b8cff'};
@@ -239,7 +324,7 @@ function flink(rows){if(!rows||!rows.length)return '<div class="empty">nenhum jo
     rows.map(j=>`<tr><td>${j.name}</td><td class="${j.state}">${j.state}</td></tr>`).join('')+`</tbody></table>`;}
 function tab(rows){if(!rows||!rows.length)return '<div class="empty">aguardando dados…</div>';
   return `<table><thead><tr><th>Nota</th><th>Cliente</th><th>UF</th><th>Status</th><th class="right">Total</th><th>Hora</th></tr></thead><tbody>`+
-    rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td><span class="tag ${r[3]}">${r[3]}</span></td><td class="right">${brl(r[4])}</td><td>${r[5].substring(11,19)}</td></tr>`).join('')+`</tbody></table>`;}
+    rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td><span class="tag ${r[3]}">${r[3]}</span></td><td class="right">${brl(r[4])}</td><td>${(r[5]||'').substring(11,19)}</td></tr>`).join('')+`</tbody></table>`;}
 async function tick(){try{
   const d=await(await fetch('/api/console')).json();
   document.getElementById('svc').innerHTML=svc(d.servicos);
@@ -250,12 +335,12 @@ async function tick(){try{
   document.getElementById('k_prod').textContent=brl(d.kpi.produtos);
   document.getElementById('k_imp').textContent=brl(d.kpi.impostos);
   document.getElementById('k_itens').textContent=Math.round(d.kpi.itens).toLocaleString('pt-BR');
-  document.getElementById('uf').innerHTML=bars(d.por_uf);
-  document.getElementById('seg').innerHTML=bars(d.por_segmento);
+  if(!ufC){ufC=mkChart('ufChart','#5b8cff');segC=mkChart('segChart','#a96fb0');}
+  updChart(ufC,d.por_uf); updChart(segC,d.por_segmento);
   document.getElementById('tab').innerHTML=tab(d.recentes);
   document.getElementById('ts').textContent=new Date().toLocaleTimeString('pt-BR');
 }catch(e){console.error(e);}}
-tick();setInterval(tick,3000);
+tick();setInterval(tick,1500);
 </script></body></html>
 """
 
@@ -266,4 +351,4 @@ def index():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8050)
+    app.run(host="0.0.0.0", port=8050, threaded=True)

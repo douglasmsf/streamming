@@ -209,7 +209,7 @@ services:
     image: trinodb/trino:447
     ports:
       - "8080:8080"
-    mem_limit: 3g
+    mem_limit: 4g
     volumes:
       - ./trino/etc:/etc/trino:ro
     depends_on:

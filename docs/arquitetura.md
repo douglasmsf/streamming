@@ -91,7 +91,22 @@ flowchart LR
 | trino           | trinodb/trino:447              | 8080         | Query engine |
 | airflow         | streamming/airflow             | 8082         | Orquestração (admin/admin) |
 | airflow-db      | postgres:16                     | -            | Metadados do Airflow |
-| dashboard       | streamming/dashboard           | 8050         | Dashboard tempo real |
+| iceberg-db      | postgres:16                     | -            | Catálogo Iceberg (backend) |
+| serving         | streamming/serving             | 8060         | REST API + OAuth2 |
+| dashboard       | streamming/dashboard           | 8050         | Console tempo real (Kafka) |
+
+> **Dashboard em tempo real:** o console (8050) **consome os tópicos Kafka
+> diretamente** e mantém o estado em memória, atualizando a cada mensagem — sem
+> depender do Trino. Assim o painel é instantâneo e estável mesmo sob streaming
+> pesado. O Trino é usado apenas para SQL ad-hoc, dbt e Data Quality (batch).
+>
+> **Catálogo Iceberg:** o `iceberg-rest` usa **Postgres** (`iceberg-db`) como
+> backend de metadados (suporta commits concorrentes do Flink; o SQLite padrão
+> trava com `SQLITE_BUSY`).
+>
+> **Manutenção:** a DAG `iceberg_maintenance` (Airflow, a cada 5 min) roda
+> `OPTIMIZE` + `expire_snapshots` para manter as tabelas compactas e as
+> consultas rápidas mesmo após horas de ingestão.
 | cdc-generator   | streamming/cdc-generator       | -            | Simula o CDC |
 | folder-producer | streamming/folder-producer     | -            | Pasta → Kafka |
 

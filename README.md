@@ -107,6 +107,8 @@ Passo a passo completo em [`docs/runbook.md`](docs/runbook.md).
 > O **Console** (http://localhost:8050) mostra numa página só: status de cada
 > serviço, registros por camada (lz→bronze→silver→gold→semantic) em tempo real,
 > os jobs Flink rodando, KPIs/dados de venda ao vivo e o diagrama da arquitetura.
+> Ele **consome o Kafka diretamente** (estado em memória, atualiza a cada
+> mensagem) — não depende do Trino, então é instantâneo e estável.
 
 ## Estrutura do repositório
 
