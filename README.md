@@ -1,5 +1,15 @@
 # Plataforma de Streaming CDC — Notas Fiscais
 
+[![CI](https://github.com/douglasmsf/streamming/actions/workflows/ci.yml/badge.svg)](https://github.com/douglasmsf/streamming/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/tag/douglasmsf/streamming?label=release&sort=semver)](https://github.com/douglasmsf/streamming/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Kafka](https://img.shields.io/badge/Apache%20Kafka-KRaft-231F20?logo=apachekafka)
+![Flink](https://img.shields.io/badge/Apache%20Flink-SQL-E6526F?logo=apacheflink)
+![Iceberg](https://img.shields.io/badge/Apache%20Iceberg-Parquet-1A73E8)
+![Trino](https://img.shields.io/badge/Trino-SQL-DD00A1?logo=trino)
+![dbt](https://img.shields.io/badge/dbt-semantic-FF694B?logo=dbt)
+![Airflow](https://img.shields.io/badge/Apache%20Airflow-orquestra%C3%A7%C3%A3o-017CEE?logo=apacheairflow)
+
 Plataforma de dados **100% local** que simula um **CDC (Change Data Capture)**
 de um Postgres de notas fiscais e o processa em tempo real numa arquitetura
 **medallion** (bronze → silver → gold), com persistência em **Apache Iceberg /
