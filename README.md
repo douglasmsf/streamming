@@ -1,5 +1,7 @@
 # 🛰️ Plataforma de Streaming CDC — Lakehouse em Tempo Real
 
+**🇧🇷 Português** | [🇬🇧 English](README.en.md)
+
 > **Pipeline de dados end-to-end, 100% local:** CDC simulado → **Kafka** → **Flink** (medallion) → **Iceberg/Parquet** → **Trino** + **dbt** + **Airflow**, com **dashboard em tempo real** e **REST API**.
 >
 > *End-to-end, fully-local streaming data platform — the local equivalent of an AWS lakehouse (DMS → MSK → Flink → S3/Iceberg → Glue DQ → REST API).*
